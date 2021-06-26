@@ -866,6 +866,21 @@ func opSuicide(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 	return nil, nil
 }
 
+func opExtInfo(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
+	typ := stack.pop().Int64()
+	offset := stack.pop()
+	switch typ {
+	// GET BALANCE BY ASSETID
+	case 0x00:
+		assetID := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64(), 32))
+		address := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64()+32, 32))
+		balance := interpreter.evm.StateDB.GetBalance(common.BigToHash(assetID), common.BigToAddress(address))
+		stack.push(balance)
+	}
+	interpreter.intPool.put(offset)
+	return nil, nil
+}
+
 // following functions are used by the instruction jump  table
 
 // make log instruction function

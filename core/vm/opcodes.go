@@ -211,6 +211,8 @@ const (
 	RETURN
 	DELEGATECALL
 	CREATE2
+	EXTINFO
+
 	STATICCALL = 0xfa
 
 	REVERT       = 0xfd
@@ -374,6 +376,7 @@ var opCodeToString = map[OpCode]string{
 	CALLCODE:     "CALLCODE",
 	DELEGATECALL: "DELEGATECALL",
 	CREATE2:      "CREATE2",
+	EXTINFO:      "EXTINFO",
 	STATICCALL:   "STATICCALL",
 	REVERT:       "REVERT",
 	SELFDESTRUCT: "SELFDESTRUCT",
@@ -527,6 +530,7 @@ var stringToOp = map[string]OpCode{
 	"LOG4":           LOG4,
 	"CREATE":         CREATE,
 	"CREATE2":        CREATE2,
+	"EXTINFO":        EXTINFO,
 	"CALL":           CALL,
 	"RETURN":         RETURN,
 	"CALLCODE":       CALLCODE,

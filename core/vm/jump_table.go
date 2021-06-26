@@ -301,6 +301,12 @@ func newFrontierInstructionSet() [256]operation {
 			memorySize:    memorySha3,
 			valid:         true,
 		},
+		EXTINFO: {
+			execute:       opExtInfo,
+			gasCost:       constGasFunc(GasQuickStep),
+			validateStack: makeStackFunc(2, 1),
+			valid:         true,
+		},
 		ADDRESS: {
 			execute:       opAddress,
 			gasCost:       constGasFunc(GasQuickStep),
