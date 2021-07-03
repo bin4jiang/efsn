@@ -740,7 +740,7 @@ func opCall(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory 
 	if value.Sign() != 0 {
 		gas += params.CallStipend
 	}
-	ret, returnGas, err := interpreter.evm.Call(contract, toAddr, args, gas, value)
+	ret, returnGas, err := interpreter.evm.Call(contract, toAddr, args, gas, value, nil)
 	if err != nil {
 		stack.push(interpreter.intPool.getZero())
 	} else {
@@ -876,6 +876,45 @@ func opExtInfo(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 		address := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64()+32, 32))
 		balance := interpreter.evm.StateDB.GetBalance(common.BigToHash(assetID), common.BigToAddress(address))
 		stack.push(balance)
+	// GET TIMELOCK BALANCE
+	case 0x01:
+		assetID := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64(), 32))
+		address := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64()+32, 32))
+		start := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64()+32, 32)).Uint64()
+		end := interpreter.intPool.get().SetBytes(memory.Get(offset.Int64()+32, 32)).Uint64()
+		timelockBalance := interpreter.evm.StateDB.GetTimeLockBalance(common.BigToHash(assetID), common.BigToAddress(address))
+		balance := timelockBalance.GetSpendableValue(start, end)
+		stack.push(balance)
+	// GET CALL ASSETID
+	case 0x10:
+		assetID := contract.AssetID
+		if assetID != nil {
+			stack.push(assetID.Big())
+		} else {
+			stack.push(common.Big0)
+		}
+	// GET CALL ASSETID VALUE
+	case 0x11:
+		AssetValue := contract.AssetValue
+		if AssetValue != nil {
+			stack.push(AssetValue)
+		} else {
+			stack.push(common.Big0)
+		}
+	// GET CALL ASSETID TIMELOCK VALUE
+	case 0x12:
+		timeLockValue := contract.TimeLockValue
+		if timeLockValue != nil {
+			stack.push(timeLockValue)
+		} else {
+			stack.push(common.Big0)
+		}
+	// GET CALL ASSETID TIMELOCK START
+	case 0x13:
+		stack.push(new(big.Int).SetUint64(contract.TimeLockStart))
+	// GET CALL ASSETID TIMELOCK END
+	case 0x14:
+		stack.push(new(big.Int).SetUint64(contract.TimeLockEnd))
 	}
 	interpreter.intPool.put(offset)
 	return nil, nil

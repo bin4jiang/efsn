@@ -49,6 +49,13 @@ type Contract struct {
 	caller        ContractRef
 	self          ContractRef
 
+	//EXT INFO
+	AssetID       *common.Hash
+	AssetValue    *big.Int
+	TimeLockValue *big.Int
+	TimeLockStart uint64
+	TimeLockEnd   uint64
+
 	jumpdests destinations // result of JUMPDEST analysis.
 
 	Code     []byte

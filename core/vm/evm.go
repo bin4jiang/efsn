@@ -198,7 +198,7 @@ func (evm *EVM) Interpreter() Interpreter {
 // parameters. It also handles any necessary value transfer required and takes
 // the necessary steps to create accounts and reverses the state in case of an
 // execution error or failed value transfer.
-func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas uint64, value *big.Int) (ret []byte, leftOverGas uint64, err error) {
+func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas uint64, value *big.Int, fsnCallContext *common.FSNCallContext) (ret []byte, leftOverGas uint64, err error) {
 	if evm.vmConfig.NoRecursion && evm.depth > 0 {
 		return nil, gas, nil
 	}
@@ -238,6 +238,11 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		}
 	}
 
+	if fsnCallContext != nil {
+		addr = fsnCallContext.To
+		input = fsnCallContext.Data
+	}
+
 	var (
 		to       = AccountRef(addr)
 		snapshot = evm.StateDB.Snapshot()
@@ -263,6 +268,14 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, to, value, gas)
 	contract.SetCallCode(&addr, evm.StateDB.GetCodeHash(addr), evm.StateDB.GetCode(addr))
+
+	if fsnCallContext != nil {
+		contract.AssetID = fsnCallContext.AssetID
+		contract.AssetValue = fsnCallContext.AssetValue
+		contract.TimeLockValue = fsnCallContext.TimeLockValue
+		contract.TimeLockStart = fsnCallContext.TimeLockStart
+		contract.TimeLockEnd = fsnCallContext.TimeLockEnd
+	}
 
 	start := time.Now()
 

@@ -10,8 +10,20 @@ import (
 /////////////////// param type ///////////////////////
 // FSNCallParam wacom
 type FSNCallParam struct {
-	Func FSNCallFunc
+	Func     FSNCallFunc
+	Data     []byte
+	CallData []byte
+}
+
+type FSNCallContext struct {
+	To   Address
 	Data []byte
+
+	AssetID       *Hash
+	AssetValue    *big.Int
+	TimeLockValue *big.Int
+	TimeLockStart uint64
+	TimeLockEnd   uint64
 }
 
 // GenAssetParam wacom
@@ -32,9 +44,10 @@ type BuyTicketParam struct {
 
 // SendAssetParam wacom
 type SendAssetParam struct {
-	AssetID Hash
-	To      Address
-	Value   *big.Int `json:",string"`
+	AssetID  Hash
+	To       Address
+	Value    *big.Int `json:",string"`
+	CallData []byte
 }
 
 // AssetValueChangeExParam wacom
@@ -54,6 +67,7 @@ type TimeLockParam struct {
 	StartTime uint64
 	EndTime   uint64
 	Value     *big.Int `json:",string"`
+	CallData  []byte
 }
 
 // MakeSwapParam wacom

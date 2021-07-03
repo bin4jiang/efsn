@@ -37,10 +37,11 @@ type GenAssetArgs struct {
 // SendAssetArgs wacom
 type SendAssetArgs struct {
 	FusionBaseArgs
-	AssetID Hash         `json:"asset"`
-	To      Address      `json:"to"`
-	ToUSAN  uint64       `json:"toUSAN"`
-	Value   *hexutil.Big `json:"value"`
+	AssetID  Hash         `json:"asset"`
+	To       Address      `json:"to"`
+	ToUSAN   uint64       `json:"toUSAN"`
+	Value    *hexutil.Big `json:"value"`
+	CallData []byte       `json:"callData"`
 }
 
 // TimeLockArgs wacom
@@ -49,6 +50,7 @@ type TimeLockArgs struct {
 	StartTime    *hexutil.Uint64 `json:"start"`
 	EndTime      *hexutil.Uint64 `json:"end"`
 	TimeLockType TimeLockType    `json:"type"`
+	CallData     []byte          `json:"callData"`
 }
 
 // BuyTicketArgs wacom
@@ -135,9 +137,10 @@ func (args *FusionBaseArgs) ToData() ([]byte, error) {
 
 func (args *SendAssetArgs) ToParam() *SendAssetParam {
 	return &SendAssetParam{
-		AssetID: args.AssetID,
-		To:      args.To,
-		Value:   args.Value.ToInt(),
+		AssetID:  args.AssetID,
+		To:       args.To,
+		Value:    args.Value.ToInt(),
+		CallData: args.CallData,
 	}
 }
 
@@ -153,6 +156,7 @@ func (args *TimeLockArgs) ToParam() *TimeLockParam {
 		StartTime: uint64(*args.StartTime),
 		EndTime:   uint64(*args.EndTime),
 		Value:     args.Value.ToInt(),
+		CallData:  args.CallData,
 	}
 }
 

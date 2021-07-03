@@ -230,9 +230,8 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 	} else {
 		// Increment the nonce for the next transaction
 		st.state.SetNonce(msg.From(), st.state.GetNonce(sender.Address())+1)
-
 		if fsnCallParam != nil {
-			errc := st.handleFsnCall(fsnCallParam)
+			fsnCallContext, errc := st.handleFsnCall(fsnCallParam)
 			if errc != nil {
 				isInMining := st.evm.Context.MixDigest == (common.Hash{})
 				if isInMining {
@@ -241,9 +240,11 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 				}
 				common.DebugInfo("handleFsnCall error", "number", st.evm.Context.BlockNumber, "Func", fsnCallParam.Func, "err", errc)
 			}
+			ret, st.gas, vmerr = evm.Call(sender, st.to(), st.data, st.gas, st.value, fsnCallContext)
+		} else {
+			ret, st.gas, vmerr = evm.Call(sender, st.to(), st.data, st.gas, st.value, nil)
 		}
 
-		ret, st.gas, vmerr = evm.Call(sender, st.to(), st.data, st.gas, st.value)
 	}
 	if vmerr != nil {
 		log.Debug("VM returned with error", "err", vmerr)
@@ -295,7 +296,7 @@ func outputCommandInfo(param1 string, param2 string, param3 interface{}) {
 	}
 }
 
-func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
+func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) (*common.FSNCallContext, error) {
 	height := st.evm.Context.BlockNumber
 	timestamp := st.evm.Context.ParentTime.Uint64()
 
@@ -304,44 +305,49 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		outputCommandInfo("GenNotationFunc", "from", st.msg.From())
 		if err := st.state.GenNotation(st.msg.From()); err != nil {
 			st.addLog(common.GenNotationFunc, param, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 		st.addLog(common.GenNotationFunc, param, common.NewKeyValue("notation", st.state.GetNotation(st.msg.From())))
-		return nil
+		return nil, nil
 	case common.GenAssetFunc:
 		outputCommandInfo("GenAssetFunc", "from", st.msg.From())
 		genAssetParam := common.GenAssetParam{}
 		rlp.DecodeBytes(param.Data, &genAssetParam)
 		if err := genAssetParam.Check(height); err != nil {
 			st.addLog(common.GenAssetFunc, genAssetParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 		asset := genAssetParam.ToAsset()
 		asset.ID = st.msg.AsTransaction().Hash()
 		asset.Owner = st.msg.From()
 		if err := st.state.GenAsset(asset); err != nil {
 			st.addLog(common.GenAssetFunc, genAssetParam, common.NewKeyValue("Error", "unable to gen asset"))
-			return err
+			return nil, err
 		}
 		st.state.AddBalance(st.msg.From(), asset.ID, asset.Total)
 		st.addLog(common.GenAssetFunc, genAssetParam, common.NewKeyValue("AssetID", asset.ID))
-		return nil
+		return nil, nil
 	case common.SendAssetFunc:
 		outputCommandInfo("SendAssetFunc", "from", st.msg.From())
 		sendAssetParam := common.SendAssetParam{}
 		rlp.DecodeBytes(param.Data, &sendAssetParam)
 		if err := sendAssetParam.Check(height); err != nil {
 			st.addLog(common.SendAssetFunc, sendAssetParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 		if st.state.GetBalance(sendAssetParam.AssetID, st.msg.From()).Cmp(sendAssetParam.Value) < 0 {
 			st.addLog(common.SendAssetFunc, sendAssetParam, common.NewKeyValue("Error", "not enough asset"))
-			return fmt.Errorf("not enough asset")
+			return nil, fmt.Errorf("not enough asset")
 		}
 		st.state.SubBalance(st.msg.From(), sendAssetParam.AssetID, sendAssetParam.Value)
 		st.state.AddBalance(sendAssetParam.To, sendAssetParam.AssetID, sendAssetParam.Value)
 		st.addLog(common.SendAssetFunc, sendAssetParam, common.NewKeyValue("AssetID", sendAssetParam.AssetID))
-		return nil
+		return &common.FSNCallContext{
+			To:         sendAssetParam.To,
+			Data:       sendAssetParam.CallData,
+			AssetID:    &sendAssetParam.AssetID,
+			AssetValue: sendAssetParam.Value,
+		}, nil
 	case common.TimeLockFunc:
 		outputCommandInfo("TimeLockFunc", "from", st.msg.From())
 		timeLockParam := common.TimeLockParam{}
@@ -351,13 +357,13 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if timeLockParam.Type == common.TimeLockToAsset {
 			if timeLockParam.StartTime > uint64(time.Now().Unix()) {
 				st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "TimeLockToAsset"), common.NewKeyValue("Error", "Start time must be less than now"))
-				return fmt.Errorf("Start time must be less than now")
+				return nil, fmt.Errorf("Start time must be less than now")
 			}
 			timeLockParam.EndTime = common.TimeLockForever
 		}
 		if err := timeLockParam.Check(height, timestamp); err != nil {
 			st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		start := timeLockParam.StartTime
@@ -374,14 +380,14 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 
 		if err := needValue.IsValid(); err != nil {
 			st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("Error", err.Error()))
-			return fmt.Errorf(err.Error())
+			return nil, fmt.Errorf(err.Error())
 		}
 
 		switch timeLockParam.Type {
 		case common.AssetToTimeLock:
 			if st.state.GetBalance(timeLockParam.AssetID, st.msg.From()).Cmp(timeLockParam.Value) < 0 {
 				st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "AssetToTimeLock"), common.NewKeyValue("Error", "not enough asset"))
-				return fmt.Errorf("not enough asset")
+				return nil, fmt.Errorf("not enough asset")
 			}
 			st.state.SubBalance(st.msg.From(), timeLockParam.AssetID, timeLockParam.Value)
 
@@ -401,29 +407,48 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			}
 
 			st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "AssetToTimeLock"), common.NewKeyValue("AssetID", timeLockParam.AssetID))
-			return nil
+			return &common.FSNCallContext{
+				To:            timeLockParam.To,
+				Data:          timeLockParam.CallData,
+				AssetID:       &timeLockParam.AssetID,
+				TimeLockValue: timeLockParam.Value,
+				TimeLockStart: timeLockParam.StartTime,
+				TimeLockEnd:   timeLockParam.EndTime,
+			}, nil
 		case common.TimeLockToTimeLock:
 			if st.state.GetTimeLockBalance(timeLockParam.AssetID, st.msg.From()).Cmp(needValue) < 0 {
 				st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "TimeLockToTimeLock"), common.NewKeyValue("Error", "not enough time lock balance"))
-				return fmt.Errorf("not enough time lock balance")
+				return nil, fmt.Errorf("not enough time lock balance")
 			}
 			st.state.SubTimeLockBalance(st.msg.From(), timeLockParam.AssetID, needValue, height, timestamp)
 			st.state.AddTimeLockBalance(timeLockParam.To, timeLockParam.AssetID, needValue, height, timestamp)
 			st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "TimeLockToTimeLock"), common.NewKeyValue("AssetID", timeLockParam.AssetID))
-			return nil
+			return &common.FSNCallContext{
+				To:            timeLockParam.To,
+				Data:          timeLockParam.CallData,
+				AssetID:       &timeLockParam.AssetID,
+				TimeLockValue: timeLockParam.Value,
+				TimeLockStart: timeLockParam.StartTime,
+				TimeLockEnd:   timeLockParam.EndTime,
+			}, nil
 		case common.TimeLockToAsset:
 			if st.state.GetTimeLockBalance(timeLockParam.AssetID, st.msg.From()).Cmp(needValue) < 0 {
 				st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "TimeLockToAsset"), common.NewKeyValue("Error", "not enough time lock balance"))
-				return fmt.Errorf("not enough time lock balance")
+				return nil, fmt.Errorf("not enough time lock balance")
 			}
 			st.state.SubTimeLockBalance(st.msg.From(), timeLockParam.AssetID, needValue, height, timestamp)
 			st.state.AddBalance(timeLockParam.To, timeLockParam.AssetID, timeLockParam.Value)
 			st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "TimeLockToAsset"), common.NewKeyValue("AssetID", timeLockParam.AssetID))
-			return nil
+			return &common.FSNCallContext{
+				To:         timeLockParam.To,
+				Data:       timeLockParam.CallData,
+				AssetID:    &timeLockParam.AssetID,
+				AssetValue: timeLockParam.Value,
+			}, nil
 		case common.SmartTransfer:
 			if !common.IsSmartTransferEnabled(height) {
 				st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "SmartTransfer"), common.NewKeyValue("Error", "not enabled"))
-				return fmt.Errorf("SendTimeLock not enabled")
+				return nil, fmt.Errorf("SendTimeLock not enabled")
 			}
 			timeLockBalance := st.state.GetTimeLockBalance(timeLockParam.AssetID, st.msg.From())
 			if timeLockBalance.Cmp(needValue) < 0 {
@@ -431,7 +456,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 				assetBalance := st.state.GetBalance(timeLockParam.AssetID, st.msg.From())
 				if new(big.Int).Add(timeLockValue, assetBalance).Cmp(timeLockParam.Value) < 0 {
 					st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "SmartTransfer"), common.NewKeyValue("Error", "not enough balance"))
-					return fmt.Errorf("not enough balance")
+					return nil, fmt.Errorf("not enough balance")
 				}
 				if timeLockValue.Sign() > 0 {
 					subTimeLock := common.GetTimeLock(timeLockValue, start, end)
@@ -453,7 +478,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 				st.state.AddBalance(timeLockParam.To, timeLockParam.AssetID, timeLockParam.Value)
 			}
 			st.addLog(common.TimeLockFunc, timeLockParam, common.NewKeyValue("LockType", "SmartTransfer"), common.NewKeyValue("AssetID", timeLockParam.AssetID))
-			return nil
+			return nil, nil
 		}
 	case common.BuyTicketFunc:
 		outputCommandInfo("BuyTicketFunc", "from", st.msg.From())
@@ -463,7 +488,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 
 		if st.state.IsTicketExist(id) {
 			st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("Error", "Ticket already exist"))
-			return fmt.Errorf(id.String() + " Ticket already exist")
+			return nil, fmt.Errorf(id.String() + " Ticket already exist")
 		}
 
 		buyTicketParam := common.BuyTicketParam{}
@@ -473,12 +498,12 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if common.IsHardFork(2, height) {
 			if err := buyTicketParam.Check(height, timestamp); err != nil {
 				st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 		} else {
 			if err := buyTicketParam.Check(height, 0); err != nil {
 				st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 		}
 
@@ -494,7 +519,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		})
 		if err := needValue.IsValid(); err != nil {
 			st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("Error", err.Error()))
-			return fmt.Errorf(err.Error())
+			return nil, fmt.Errorf(err.Error())
 		}
 
 		ticket := common.Ticket{
@@ -511,7 +536,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if st.state.GetTimeLockBalance(common.SystemAssetID, from).Cmp(needValue) < 0 {
 			if st.state.GetBalance(common.SystemAssetID, from).Cmp(value) < 0 {
 				st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("Error", "not enough time lock or asset balance"))
-				return fmt.Errorf("not enough time lock or asset balance")
+				return nil, fmt.Errorf("not enough time lock or asset balance")
 			}
 			useAsset = true
 		}
@@ -535,10 +560,10 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 
 		if err := st.state.AddTicket(ticket); err != nil {
 			st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("Error", "unable to add ticket"))
-			return err
+			return nil, err
 		}
 		st.addLog(common.BuyTicketFunc, param.Data, common.NewKeyValue("TicketID", ticket.ID), common.NewKeyValue("TicketOwner", ticket.Owner))
-		return nil
+		return nil, nil
 	case common.AssetValueChangeFunc:
 		outputCommandInfo("AssetValueChangeFunc", "from", st.msg.From())
 		assetValueChangeParamEx := common.AssetValueChangeExParam{}
@@ -546,29 +571,29 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 
 		if err := assetValueChangeParamEx.Check(height); err != nil {
 			st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		asset, err := st.state.GetAsset(assetValueChangeParamEx.AssetID)
 		if err != nil {
 			st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", "asset not found"))
-			return fmt.Errorf("asset not found")
+			return nil, fmt.Errorf("asset not found")
 		}
 
 		if !asset.CanChange {
 			st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", "asset can't inc or dec"))
-			return fmt.Errorf("asset can't inc or dec")
+			return nil, fmt.Errorf("asset can't inc or dec")
 		}
 
 		if asset.Owner != st.msg.From() {
 			st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", "can only be changed by owner"))
-			return fmt.Errorf("can only be changed by owner")
+			return nil, fmt.Errorf("can only be changed by owner")
 		}
 
 		if asset.Owner != assetValueChangeParamEx.To && !assetValueChangeParamEx.IsInc {
 			err := fmt.Errorf("decrement can only happen to asset's own account")
 			st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		if assetValueChangeParamEx.IsInc {
@@ -577,7 +602,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		} else {
 			if st.state.GetBalance(assetValueChangeParamEx.AssetID, assetValueChangeParamEx.To).Cmp(assetValueChangeParamEx.Value) < 0 {
 				st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", "not enough asset"))
-				return fmt.Errorf("not enough asset")
+				return nil, fmt.Errorf("not enough asset")
 			}
 			st.state.SubBalance(assetValueChangeParamEx.To, assetValueChangeParamEx.AssetID, assetValueChangeParamEx.Value)
 			asset.Total = asset.Total.Sub(asset.Total, assetValueChangeParamEx.Value)
@@ -588,7 +613,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		} else {
 			st.addLog(common.AssetValueChangeFunc, assetValueChangeParamEx, common.NewKeyValue("Error", "error update asset"))
 		}
-		return err
+		return nil, err
 	case common.EmptyFunc:
 	case common.MakeSwapFunc, common.MakeSwapFuncExt:
 		outputCommandInfo("MakeSwapFunc", "from", st.msg.From())
@@ -600,12 +625,12 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		_, err := st.state.GetSwap(swapId)
 		if err == nil {
 			st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", "Swap already exist"))
-			return fmt.Errorf("Swap already exist")
+			return nil, fmt.Errorf("Swap already exist")
 		}
 
 		if err := makeSwapParam.Check(height, timestamp); err != nil {
 			st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		var useAsset bool
@@ -615,14 +640,14 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if _, err := st.state.GetAsset(makeSwapParam.ToAssetID); err != nil {
 			err := fmt.Errorf("ToAssetID's asset not found")
 			st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		if makeSwapParam.FromAssetID == common.OwnerUSANAssetID {
 			if notation == 0 {
 				err := fmt.Errorf("the from address does not have a notation")
 				st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 			makeSwapParam.MinFromAmount = big.NewInt(1)
 			makeSwapParam.SwapSize = big.NewInt(1)
@@ -643,7 +668,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 				})
 				if err := needValue.IsValid(); err != nil {
 					st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-					return fmt.Errorf(err.Error())
+					return nil, fmt.Errorf(err.Error())
 				}
 			}
 		}
@@ -668,13 +693,13 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if makeSwapParam.FromAssetID == common.OwnerUSANAssetID {
 			if err := st.state.AddSwap(swap); err != nil {
 				st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", "System error can't add swap"))
-				return err
+				return nil, err
 			}
 		} else {
 			if useAsset == true {
 				if st.state.GetBalance(makeSwapParam.FromAssetID, st.msg.From()).Cmp(total) < 0 {
 					st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", "not enough from asset"))
-					return fmt.Errorf("not enough from asset")
+					return nil, fmt.Errorf("not enough from asset")
 				}
 			} else {
 				available := st.state.GetTimeLockBalance(makeSwapParam.FromAssetID, st.msg.From())
@@ -683,12 +708,12 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 						// this was the legacy swap do not do
 						// time lock and just return an error
 						st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", "not enough time lock or asset balance"))
-						return fmt.Errorf("not enough time lock balance")
+						return nil, fmt.Errorf("not enough time lock balance")
 					}
 
 					if st.state.GetBalance(makeSwapParam.FromAssetID, st.msg.From()).Cmp(total) < 0 {
 						st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", "not enough time lock or asset balance"))
-						return fmt.Errorf("not enough time lock or asset balance")
+						return nil, fmt.Errorf("not enough time lock or asset balance")
 					}
 
 					// subtract the asset from the balance
@@ -706,7 +731,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 
 			if err := st.state.AddSwap(swap); err != nil {
 				st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("Error", "System error can't add swap"))
-				return err
+				return nil, err
 			}
 
 			// take from the owner the asset
@@ -717,7 +742,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			}
 		}
 		st.addLog(common.MakeSwapFunc, makeSwapParam, common.NewKeyValue("SwapID", swap.ID))
-		return nil
+		return nil, nil
 	case common.RecallSwapFunc:
 		outputCommandInfo("RecallSwapFunc", "from", st.msg.From())
 		recallSwapParam := common.RecallSwapParam{}
@@ -726,22 +751,22 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		swap, err := st.state.GetSwap(recallSwapParam.SwapID)
 		if err != nil {
 			st.addLog(common.RecallSwapFunc, recallSwapParam, common.NewKeyValue("Error", "Swap not found"))
-			return fmt.Errorf("Swap not found")
+			return nil, fmt.Errorf("Swap not found")
 		}
 
 		if swap.Owner != st.msg.From() {
 			st.addLog(common.RecallSwapFunc, recallSwapParam, common.NewKeyValue("Error", "Must be swap onwer can recall"))
-			return fmt.Errorf("Must be swap onwer can recall")
+			return nil, fmt.Errorf("Must be swap onwer can recall")
 		}
 
 		if err := recallSwapParam.Check(height, &swap); err != nil {
 			st.addLog(common.RecallSwapFunc, recallSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		if err := st.state.RemoveSwap(swap.ID); err != nil {
 			st.addLog(common.RecallSwapFunc, recallSwapParam, common.NewKeyValue("Error", "Unable to remove swap"))
-			return err
+			return nil, err
 		}
 
 		if swap.FromAssetID != common.OwnerUSANAssetID {
@@ -765,7 +790,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			}
 		}
 		st.addLog(common.RecallSwapFunc, recallSwapParam, common.NewKeyValue("SwapID", swap.ID))
-		return nil
+		return nil, nil
 	case common.TakeSwapFunc, common.TakeSwapFuncExt:
 		outputCommandInfo("TakeSwapFunc", "from", st.msg.From())
 		takeSwapParam := common.TakeSwapParam{}
@@ -774,18 +799,18 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		swap, err := st.state.GetSwap(takeSwapParam.SwapID)
 		if err != nil {
 			st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "swap not found"))
-			return fmt.Errorf("Swap not found")
+			return nil, fmt.Errorf("Swap not found")
 		}
 
 		if err := takeSwapParam.Check(height, &swap, timestamp); err != nil {
 			st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		if common.IsPrivateSwapCheckingEnabled(height) {
 			if err := common.CheckSwapTargets(swap.Targes, st.msg.From()); err != nil {
 				st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 		}
 
@@ -795,7 +820,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			if notation == 0 || notation != swap.Notation {
 				err := fmt.Errorf("notation in swap is no longer valid")
 				st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 			usanSwap = true
 		} else {
@@ -833,7 +858,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if toUseAsset == true {
 			if st.state.GetBalance(swap.ToAssetID, st.msg.From()).Cmp(toTotal) < 0 {
 				st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "not enough from asset"))
-				return fmt.Errorf("not enough from asset")
+				return nil, fmt.Errorf("not enough from asset")
 			}
 		} else {
 			isValid := true
@@ -846,12 +871,12 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 					// this was the legacy swap do not do
 					// time lock and just return an error
 					st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "not enough time lock balance"))
-					return fmt.Errorf("not enough time lock balance")
+					return nil, fmt.Errorf("not enough time lock balance")
 				}
 
 				if st.state.GetBalance(swap.ToAssetID, st.msg.From()).Cmp(toTotal) < 0 {
 					st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "not enough time lock balance"))
-					return fmt.Errorf("not enough time lock or asset balance")
+					return nil, fmt.Errorf("not enough time lock or asset balance")
 				}
 
 				// subtract the asset from the balance
@@ -872,14 +897,14 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if swap.SwapSize.Cmp(takeSwapParam.Size) == 0 {
 			if err := st.state.RemoveSwap(swap.ID); err != nil {
 				st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "System Error"))
-				return err
+				return nil, err
 			}
 			swapDeleted = "true"
 		} else {
 			swap.SwapSize = swap.SwapSize.Sub(swap.SwapSize, takeSwapParam.Size)
 			if err := st.state.UpdateSwap(swap); err != nil {
 				st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "System Error"))
-				return err
+				return nil, err
 			}
 		}
 
@@ -898,7 +923,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			err := st.state.TransferNotation(swap.Notation, swap.Owner, st.msg.From())
 			if err != nil {
 				st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("Error", "System Error"))
-				return err
+				return nil, err
 			}
 		} else {
 			if fromUseAsset == true {
@@ -918,7 +943,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			}
 		}
 		st.addLog(common.TakeSwapFunc, takeSwapParam, common.NewKeyValue("SwapID", swap.ID), common.NewKeyValue("Deleted", swapDeleted))
-		return nil
+		return nil, nil
 	case common.RecallMultiSwapFunc:
 		outputCommandInfo("RecallMultiSwapFunc", "from", st.msg.From())
 		recallSwapParam := common.RecallMultiSwapParam{}
@@ -927,22 +952,22 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		swap, err := st.state.GetMultiSwap(recallSwapParam.SwapID)
 		if err != nil {
 			st.addLog(common.RecallMultiSwapFunc, recallSwapParam, common.NewKeyValue("Error", "Swap not found"))
-			return fmt.Errorf("Swap not found")
+			return nil, fmt.Errorf("Swap not found")
 		}
 
 		if swap.Owner != st.msg.From() {
 			st.addLog(common.RecallMultiSwapFunc, recallSwapParam, common.NewKeyValue("Error", "Must be swap onwer can recall"))
-			return fmt.Errorf("Must be swap onwer can recall")
+			return nil, fmt.Errorf("Must be swap onwer can recall")
 		}
 
 		if err := recallSwapParam.Check(height, &swap); err != nil {
 			st.addLog(common.RecallMultiSwapFunc, recallSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		if err := st.state.RemoveMultiSwap(swap.ID); err != nil {
 			st.addLog(common.RecallMultiSwapFunc, recallSwapParam, common.NewKeyValue("Error", "Unable to remove swap"))
-			return err
+			return nil, err
 		}
 
 		ln := len(swap.FromAssetID)
@@ -968,7 +993,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			}
 		}
 		st.addLog(common.RecallMultiSwapFunc, recallSwapParam, common.NewKeyValue("SwapID", swap.ID))
-		return nil
+		return nil, nil
 	case common.MakeMultiSwapFunc:
 		outputCommandInfo("MakeMultiSwapFunc", "from", st.msg.From())
 		notation := st.state.GetNotation(st.msg.From())
@@ -979,19 +1004,19 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		_, err := st.state.GetSwap(swapID)
 		if err == nil {
 			st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", "Swap already exist"))
-			return fmt.Errorf("Swap already exist")
+			return nil, fmt.Errorf("Swap already exist")
 		}
 
 		if err := makeSwapParam.Check(height, timestamp); err != nil {
 			st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		for _, toAssetID := range makeSwapParam.ToAssetID {
 			if _, err := st.state.GetAsset(toAssetID); err != nil {
 				err := fmt.Errorf("ToAssetID's asset not found")
 				st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 		}
 
@@ -1024,7 +1049,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 				})
 				if err := needValue[i].IsValid(); err != nil {
 					st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-					return fmt.Errorf(err.Error())
+					return nil, fmt.Errorf(err.Error())
 				}
 			}
 
@@ -1055,7 +1080,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 				if balance.Cmp(total[i]) < 0 {
 					err = fmt.Errorf("not enough from asset")
 					st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-					return err
+					return nil, err
 				}
 				balance.Sub(balance, total[i])
 			} else {
@@ -1063,7 +1088,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 					if balance.Cmp(total[i]) < 0 {
 						err = fmt.Errorf("not enough time lock or asset balance")
 						st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", err.Error()))
-						return err
+						return nil, err
 					}
 
 					balance.Sub(balance, total[i])
@@ -1118,16 +1143,16 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if deductErr != nil {
 			common.DebugInfo("MakeMultiSwapFunc deduct error, why check balance before have no effect?")
 			st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", deductErr.Error()))
-			return deductErr
+			return nil, deductErr
 		}
 
 		if err := st.state.AddMultiSwap(swap); err != nil {
 			st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("Error", "System error can't add swap"))
-			return err
+			return nil, err
 		}
 
 		st.addLog(common.MakeMultiSwapFunc, makeSwapParam, common.NewKeyValue("SwapID", swap.ID))
-		return nil
+		return nil, nil
 	case common.TakeMultiSwapFunc:
 		outputCommandInfo("TakeMultiSwapFunc", "from", st.msg.From())
 		takeSwapParam := common.TakeMultiSwapParam{}
@@ -1136,18 +1161,18 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		swap, err := st.state.GetMultiSwap(takeSwapParam.SwapID)
 		if err != nil {
 			st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", "swap not found"))
-			return fmt.Errorf("Swap not found")
+			return nil, fmt.Errorf("Swap not found")
 		}
 
 		if err := takeSwapParam.Check(height, &swap, timestamp); err != nil {
 			st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-			return err
+			return nil, err
 		}
 
 		if common.IsPrivateSwapCheckingEnabled(height) {
 			if err := common.CheckSwapTargets(swap.Targes, st.msg.From()); err != nil {
 				st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-				return err
+				return nil, err
 			}
 		}
 
@@ -1213,7 +1238,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 				if balance.Cmp(toTotal[i]) < 0 {
 					err = fmt.Errorf("not enough from asset")
 					st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-					return err
+					return nil, err
 				}
 				balance.Sub(balance, toTotal[i])
 			} else {
@@ -1224,7 +1249,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 					if balance.Cmp(toTotal[i]) < 0 {
 						err = fmt.Errorf("not enough time lock or asset balance")
 						st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", err.Error()))
-						return err
+						return nil, err
 					}
 
 					balance.Sub(balance, toTotal[i])
@@ -1277,7 +1302,7 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if deductErr != nil {
 			common.DebugInfo("TakeMultiSwapFunc deduct error, why check balance before have no effect?")
 			st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", deductErr.Error()))
-			return deductErr
+			return nil, deductErr
 		}
 
 		swapDeleted := "false"
@@ -1285,14 +1310,14 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 		if swap.SwapSize.Cmp(takeSwapParam.Size) == 0 {
 			if err := st.state.RemoveMultiSwap(swap.ID); err != nil {
 				st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", "System Error"))
-				return err
+				return nil, err
 			}
 			swapDeleted = "true"
 		} else {
 			swap.SwapSize = swap.SwapSize.Sub(swap.SwapSize, takeSwapParam.Size)
 			if err := st.state.UpdateMultiSwap(swap); err != nil {
 				st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("Error", "System Error"))
-				return err
+				return nil, err
 			}
 		}
 
@@ -1326,27 +1351,27 @@ func (st *StateTransition) handleFsnCall(param *common.FSNCallParam) error {
 			}
 		}
 		st.addLog(common.TakeMultiSwapFunc, takeSwapParam, common.NewKeyValue("SwapID", swap.ID), common.NewKeyValue("Deleted", swapDeleted))
-		return nil
+		return nil, nil
 	case common.ReportIllegalFunc:
 		if !common.IsMultipleMiningCheckingEnabled(height) {
-			return fmt.Errorf("report not enabled")
+			return nil, fmt.Errorf("report not enabled")
 		}
 		report := param.Data
 		header1, header2, err := datong.CheckAddingReport(st.state, report, height)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := st.state.AddReport(report); err != nil {
-			return err
+			return nil, err
 		}
 		delTickets := datong.ProcessReport(header1, header2, st.msg.From(), st.state, height, timestamp)
 		enc, _ := rlp.EncodeToBytes(delTickets)
 		str := hexutil.Encode(enc)
 		st.addLog(common.ReportIllegalFunc, "", common.NewKeyValue("DeleteTickets", str))
 		common.DebugInfo("ReportIllegal", "reporter", st.msg.From(), "double-miner", header1.Coinbase, "current-block-height", height, "double-mining-height", header1.Number, "DeleteTickets", delTickets)
-		return nil
+		return nil, nil
 	}
-	return fmt.Errorf("Unsupported")
+	return nil, fmt.Errorf("Unsupported")
 }
 
 func (st *StateTransition) addLog(typ common.FSNCallFunc, value interface{}, keyValues ...*common.KeyValue) {
