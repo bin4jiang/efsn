@@ -920,6 +920,106 @@ func opExtInfo(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memo
 	return nil, nil
 }
 
+func opExtCall(pc *uint64, interpreter *EVMInterpreter, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
+
+	height := interpreter.evm.BlockNumber
+	timestamp := interpreter.evm.Time.Uint64()
+
+	typ, assetID, startTime, endTime := stack.pop().Int64(), common.BigToHash(stack.pop()), stack.pop().Uint64(), stack.pop().Uint64()
+	gas, addr, value, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+	toAddr := common.BigToAddress(addr)
+	value = math.U256(value)
+	args := memory.Get(inOffset.Int64(), inSize.Int64())
+
+	callContext := &common.FSNCallContext{
+		To:   toAddr,
+		Data: args,
+
+		AssetID: &assetID,
+	}
+
+	sendValue := common.NewTimeLock(&common.TimeLockItem{
+		StartTime: startTime,
+		EndTime:   endTime,
+		Value:     new(big.Int).SetBytes(value.Bytes()),
+	})
+
+	switch typ {
+	// Send Asset
+	case 0x00:
+		if interpreter.evm.StateDB.GetBalance(assetID, contract.Address()).Cmp(value) < 0 {
+			return nil, fmt.Errorf("not enough asset")
+		}
+		interpreter.evm.StateDB.SubBalance(contract.Address(), assetID, value)
+		interpreter.evm.StateDB.AddBalance(toAddr, assetID, value)
+		callContext.AssetValue = value
+		break
+	// Send Timelock
+	case 0x01:
+		if interpreter.evm.StateDB.GetTimeLockBalance(assetID, contract.Address()).Cmp(sendValue) < 0 {
+			return nil, fmt.Errorf("not enough time lock balance")
+		}
+		interpreter.evm.StateDB.SubTimeLockBalance(contract.Address(), assetID, sendValue, height, timestamp)
+		interpreter.evm.StateDB.AddTimeLockBalance(toAddr, assetID, sendValue, height, timestamp)
+		callContext.TimeLockValue = value
+		callContext.TimeLockStart = startTime
+		callContext.TimeLockEnd = endTime
+		break
+	// Send Asset To Timelock
+	case 0x02:
+		if interpreter.evm.StateDB.GetBalance(assetID, contract.Address()).Cmp(value) < 0 {
+			return nil, fmt.Errorf("not enough asset")
+		}
+		interpreter.evm.StateDB.SubBalance(contract.Address(), assetID, value)
+		totalValue := common.NewTimeLock(&common.TimeLockItem{
+			StartTime: timestamp,
+			EndTime:   common.TimeLockForever,
+			Value:     new(big.Int).SetBytes(value.Bytes()),
+		})
+		if contract.Address() == toAddr {
+			interpreter.evm.StateDB.AddTimeLockBalance(toAddr, assetID, totalValue, height, timestamp)
+		} else {
+			surplusValue := new(common.TimeLock).Sub(totalValue, sendValue)
+			if !surplusValue.IsEmpty() {
+				interpreter.evm.StateDB.AddTimeLockBalance(contract.Address(), assetID, surplusValue, height, timestamp)
+			}
+			interpreter.evm.StateDB.AddTimeLockBalance(toAddr, assetID, sendValue, height, timestamp)
+		}
+		callContext.TimeLockValue = value
+		callContext.TimeLockStart = startTime
+		callContext.TimeLockEnd = endTime
+		break
+	// Send Timelock To Asset
+	case 0x03:
+		needValue := common.NewTimeLock(&common.TimeLockItem{
+			StartTime: timestamp,
+			EndTime:   common.TimeLockForever,
+			Value:     new(big.Int).SetBytes(value.Bytes()),
+		})
+		if interpreter.evm.StateDB.GetTimeLockBalance(assetID, contract.Address()).Cmp(needValue) < 0 {
+			return nil, fmt.Errorf("not enough time lock balance")
+		}
+		interpreter.evm.StateDB.SubTimeLockBalance(contract.Address(), assetID, needValue, height, timestamp)
+		interpreter.evm.StateDB.AddBalance(toAddr, assetID, value)
+		callContext.AssetValue = value
+		break
+	}
+
+	ret, returnGas, err := interpreter.evm.Call(contract, toAddr, []byte{}, gas.Uint64(), common.Big0, callContext)
+	if err != nil {
+		stack.push(interpreter.intPool.getZero())
+	} else {
+		stack.push(interpreter.intPool.get().SetUint64(1))
+	}
+
+	if err == nil || err == errExecutionReverted {
+		memory.Set(retOffset.Uint64(), retSize.Uint64(), ret)
+	}
+	contract.Gas += returnGas
+	interpreter.intPool.put(addr, value, inOffset, inSize, retOffset, retSize)
+	return ret, nil
+}
+
 // following functions are used by the instruction jump  table
 
 // make log instruction function

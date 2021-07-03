@@ -307,6 +307,14 @@ func newFrontierInstructionSet() [256]operation {
 			validateStack: makeStackFunc(2, 1),
 			valid:         true,
 		},
+		EXTCALL: {
+			execute:       opExtCall,
+			gasCost:       gasCall,
+			validateStack: makeStackFunc(11, 1),
+			memorySize:    memoryCall,
+			valid:         true,
+			returns:       true,
+		},
 		ADDRESS: {
 			execute:       opAddress,
 			gasCost:       constGasFunc(GasQuickStep),
